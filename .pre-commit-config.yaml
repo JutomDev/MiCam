@@ -1,0 +1,73 @@
+# =============================================================================
+# MIphoto — Pre-Commit Quality Gates Configuration
+# =============================================================================
+default_language_version:
+  python: python3.11
+
+default_stages: [pre-commit]
+
+repos:
+  # ---------------------------------------------------------------------------
+  # 1. Ogólne bramki higieny i bezpieczeństwa repozytorium
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: detect-private-key
+
+  # ---------------------------------------------------------------------------
+  # 2. Python: Ruff (Linter z opcją --fix & Formatter)
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.9.9
+    hooks:
+      - id: ruff
+        name: ruff check (--fix)
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+        name: ruff format
+
+  # ---------------------------------------------------------------------------
+  # 3. Python: Mypy (Statyczna kontrola typów --strict)
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.15.0
+    hooks:
+      - id: mypy
+        name: mypy (--strict)
+        args: [--strict, --ignore-missing-imports]
+
+  # ---------------------------------------------------------------------------
+  # 4. C/C++: Clang-Format (Formatowanie kodu C/C++ wg .clang-format)
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v19.1.7
+    hooks:
+      - id: clang-format
+        name: clang-format
+        types_or: [c, c++]
+        args: [--style=file]
+
+  # ---------------------------------------------------------------------------
+  # 5. C/C++: Cppcheck (Statyczna analiza kodu C/C++)
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pocc/pre-commit-hooks
+    rev: v1.3.5
+    hooks:
+      - id: cppcheck
+        name: cppcheck
+        types_or: [c, c++]
+        args:
+          - --quiet
+          - --language=c++
+          - --enable=warning,style,performance,portability
+          - --inline-suppr
+          - --error-exitcode=1
+          - --suppress=missingIncludeSystem
+          - --suppress=unmatchedSuppression
+          - --suppress=unusedStructMember
+          - -Iinclude

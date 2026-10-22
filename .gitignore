@@ -1,0 +1,84 @@
+# =============================================================================
+# MIphoto — Git Exclusion Rules (.gitignore)
+# =============================================================================
+
+# 1. Environment & Sensitive Data / Secrets
+.env
+.env.*
+*.pem
+*.key
+*.cert
+*.pfx
+secrets/
+
+# 2. Machine Learning & Model Weights
+*.pt
+*.pth
+*.onnx
+*.bin
+*.tflite
+*.safetensors
+*.weights
+*.h5
+*.hdf5
+*.ckpt
+models/
+weights/
+
+# 3. Logs & Diagnostics
+*.log
+logs/
+build/logs/
+.system_generated/
+
+# 4. Build Folders & Artifacts
+build/
+dist/
+out/
+bin/
+.pio/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# 5. Python Caches
+__pycache__/
+*.py[cod]
+*$py.class
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 6. IDEs & Editor Metadata
+.vscode/.browse.c_cpp.db*
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.vscode/ipch
+.idea/
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# 7. Scratch PDF images & Working files
+pdf_img*
+*.xcf
+
+# 8. AI Agent Workspace Rules, History & Chat Dumps
+.agents/
+AGENTS.md
+GEMINI.md
+.cursorignore
+*CZAT*
+*czat*
+
+# 9. Internal Research Notes & Test Photos
+testowy_zdjecia/
+ENCLOSURE_3D_GUIDELINES.md
+DOKUMENTACJA_MODELU_CAD_FUSION360.md
