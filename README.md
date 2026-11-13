@@ -82,18 +82,23 @@ MIphoto/
 │   └── README.md               # Hardware specifications, pinout & assembly manual
 ├── include/
 │   ├── audio_mic.h             # Digital I2S PDM microphone and clap detection
-│   ├── buzzer.h                # Non-blocking chiptune audio synthesizer
+│   ├── buzzer.h                # Non-blocking chiptune audio synthesizer & mute state
 │   ├── camera_driver.h         # Omnivision OV2640 DVP driver & ISP presets
 │   ├── config.h                # Pinout definitions, bus frequencies, and FSM enums
 │   ├── display_ui.h            # LovyanGFX ST7789 display driver & retro UI
+│   ├── input_controls.h        # Debounced button & Schmitt-trigger ADC1 joystick
+│   ├── minigame.h              # Built-in retro Mii-Snake arcade mini-game
 │   ├── sd_storage.h            # MicroSD FAT32 file storage & EXIF metadata injector
+│   ├── web_ui_assets.h         # PROGMEM HTML/CSS/JS templates for Web Console
 │   └── wifi_share.h            # SoftAP WebServer & mobile control console
 ├── src/
 │   ├── audio_mic.cpp
 │   ├── buzzer.cpp
 │   ├── camera_driver.cpp
 │   ├── display_ui.cpp
-│   ├── main.cpp                # Core application entry & FSM dispatcher
+│   ├── input_controls.cpp
+│   ├── main.cpp                # Core application entry & FSM orchestrator
+│   ├── minigame.cpp
 │   ├── sd_storage.cpp
 │   └── wifi_share.cpp
 ├── platformio.ini              # Build environment configuration (ESP32-S3 Octal PSRAM)
