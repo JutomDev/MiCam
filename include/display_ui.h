@@ -82,6 +82,7 @@ public:
 
     static void drawLiveView(uint8_t* rgb565_buf, uint16_t w, uint16_t h, const char* presetName, uint16_t photoCount,
                              bool sdOk);
+    static void drawHud(const char* presetName, uint16_t photoCount, bool sdOk);
 
     static void drawFlashAnimation();
     static void drawSavingProgress(const char* filename);
@@ -99,5 +100,4 @@ private:
     static uint8_t _brightness;
     static bool _hudDirty;
     static void drawReticleInBuffer(uint16_t* buf, uint16_t w, uint16_t h);
-    static void drawHud(const char* presetName, uint16_t photoCount, bool sdOk);
 };

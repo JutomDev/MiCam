@@ -1,6 +1,9 @@
 #include "display_ui.h"
+#include "camera_driver.h"
 #include "buzzer.h"
-#include <TJpg_Decoder.h>
+#include <SD.h>
+#include <lgfx/utility/lgfx_tjpgd.h>
+#include <esp_heap_caps.h>
 #include "esp_log.h"
 
 static const char* TAG = "DISPLAY_UI";
@@ -14,15 +17,100 @@ static char _lastPreset[24] = "";
 static uint16_t _lastPhotoCount = 0xFFFF;
 static bool _lastSdOk = false;
 
-// TJpg_Decoder output callback rendering decoded MCU blocks onto ST7789
-static bool tjpg_output_cb(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
-    if (y >= DisplayUI::getLcd().height() || x >= DisplayUI::getLcd().width()) return true;
-    DisplayUI::getLcd().pushImage(x, y, w, h, bitmap);
-    // Periodically feed the task watchdog during large JPEG decodes
-    if ((y & 0x1F) == 0) {
+struct GalleryDecodeCtx {
+    const uint8_t* memBuf;
+    size_t memLen;
+    size_t memPos;
+    File* sdFile;
+    uint16_t* decBuf;
+    uint16_t decW;
+    uint16_t decH;
+    int16_t fbX;
+    int16_t fbY;
+};
+
+static uint32_t lgfxGalleryReaderCb(void* dev, uint8_t* buf, uint32_t len) {
+    GalleryDecodeCtx* ctx = static_cast<GalleryDecodeCtx*>(dev);
+    if (!ctx) return 0;
+    if (ctx->memBuf) {
+        if (ctx->memPos >= ctx->memLen) return 0;
+        size_t avail = ctx->memLen - ctx->memPos;
+        uint32_t step = (len > avail) ? static_cast<uint32_t>(avail) : len;
+        if (buf && step > 0) {
+            memcpy(buf, ctx->memBuf + ctx->memPos, step);
+        }
+        ctx->memPos += step;
+        return step;
+    }
+    if (ctx->sdFile) {
+        if (buf) {
+            return static_cast<uint32_t>(ctx->sdFile->read(buf, len));
+        } else {
+            size_t fileSize = ctx->sdFile->size();
+            size_t pos = ctx->sdFile->position();
+            if (pos >= fileSize) return 0;
+            size_t avail = fileSize - pos;
+            uint32_t step = (len > avail) ? static_cast<uint32_t>(avail) : len;
+            ctx->sdFile->seek(pos + step);
+            return step;
+        }
+    }
+    return 0;
+}
+
+// Signature mandated by lgfx_jd_decomp callback ABI (non-const bitmap/rect)
+// cppcheck-suppress constParameterCallback
+static uint32_t lgfxGalleryOutCb(void* dev, void* bitmap, JRECT* rect) {
+    GalleryDecodeCtx* ctx = static_cast<GalleryDecodeCtx*>(dev);
+    if (!ctx || !bitmap || !rect) return 0;
+
+    const uint8_t* src = static_cast<const uint8_t*>(bitmap);
+    const uint16_t x = static_cast<uint16_t>(rect->left);
+    const uint16_t y = static_cast<uint16_t>(rect->top);
+    const uint16_t w = static_cast<uint16_t>(rect->right - rect->left + 1U);
+    const uint16_t h = static_cast<uint16_t>(rect->bottom - rect->top + 1U);
+
+    if (ctx->decBuf) {
+        if (x >= ctx->decW || y >= ctx->decH) return 1;
+        uint16_t copyW = (x + w > ctx->decW) ? (ctx->decW - x) : w;
+        uint16_t copyH = (y + h > ctx->decH) ? (ctx->decH - y) : h;
+        for (uint16_t row = 0; row < copyH; ++row) {
+            const uint8_t* srcRow = src + static_cast<size_t>(row) * w * 3U;
+            uint16_t* dstRow = ctx->decBuf + static_cast<size_t>(y + row) * ctx->decW + x;
+            for (uint16_t col = 0; col < copyW; ++col) {
+                uint8_t r = srcRow[col * 3U];
+                uint8_t g = srcRow[col * 3U + 1U];
+                uint8_t b = srcRow[col * 3U + 2U];
+                uint16_t rgb565 = static_cast<uint16_t>(((r & 0xF8U) << 8) | ((g & 0xFCU) << 3) | (b >> 3));
+                dstRow[col] = static_cast<uint16_t>((rgb565 >> 8) | (rgb565 << 8));
+            }
+        }
+    } else {
+        // Fallback path if PSRAM scaled allocation failed: push MCU rows directly to LCD
+        int16_t dstX = ctx->fbX + static_cast<int16_t>(x);
+        int16_t dstY = ctx->fbY + static_cast<int16_t>(y);
+        if (dstX < TFT_WIDTH && dstY < TFT_HEIGHT) {
+            uint16_t rowBuf[32];
+            uint16_t copyW = (w <= 32U) ? w : 32U;
+            for (uint16_t row = 0; row < h; ++row) {
+                if (dstY + static_cast<int16_t>(row) >= TFT_HEIGHT) break;
+                const uint8_t* srcRow = src + static_cast<size_t>(row) * w * 3U;
+                for (uint16_t col = 0; col < copyW; ++col) {
+                    uint8_t r = srcRow[col * 3U];
+                    uint8_t g = srcRow[col * 3U + 1U];
+                    uint8_t b = srcRow[col * 3U + 2U];
+                    uint16_t rgb565 = static_cast<uint16_t>(((r & 0xF8U) << 8) | ((g & 0xFCU) << 3) | (b >> 3));
+                    rowBuf[col] = static_cast<uint16_t>((rgb565 >> 8) | (rgb565 << 8));
+                }
+                DisplayUI::getLcd().pushImage(dstX, dstY + static_cast<int16_t>(row), copyW, 1,
+                                              reinterpret_cast<const lgfx::swap565_t*>(rowBuf));
+            }
+        }
+    }
+    if ((y & 0x0FU) == 0U) {
         yield();
     }
-    return true;
+    return 1;
 }
 
 bool DisplayUI::init() {
@@ -31,11 +119,6 @@ bool DisplayUI::init() {
     _lcd.setRotation(0);
     _lcd.setColorDepth(16);
     _lcd.fillScreen(TFT_BLACK);
-
-    // TJpgDec decoder setup for rendering images from SD card
-    TJpgDec.setJpgScale(1);
-    TJpgDec.setSwapBytes(true);
-    TJpgDec.setCallback(tjpg_output_cb);
 
     setBrightness(_brightness);
 
@@ -201,23 +284,34 @@ void DisplayUI::drawLiveView(uint8_t* rgb565_buf, uint16_t w, uint16_t h, const 
     uint16_t* pxBuf = reinterpret_cast<uint16_t*>(rgb565_buf);
     size_t count = (size_t)w * h;
 
-    // Software brightness control when hardware BLK pin is tied to 3.3V (-1)
-    if (_brightness < 240) {
-        uint8_t shift = (_brightness <= 64) ? 2 : 1;
-        for (size_t i = 0; i < count; i++) {
-            uint16_t px = pxBuf[i];
-            uint16_t v = (px >> 8) | (px << 8);
-            uint16_t r = ((v >> 11) & 0x1F) >> shift;
-            uint16_t g = ((v >> 5) & 0x3F) >> shift;
-            uint16_t b = (v & 0x1F) >> shift;
-            if (_brightness > 128 && shift == 1) {
-                // 75% brightness: add 1/4 back
-                r += ((v >> 11) & 0x1F) >> 2;
-                g += ((v >> 5) & 0x3F) >> 2;
-                b += (v & 0x1F) >> 2;
+    // Software brightness control via 32-bit 2-pixel SWAR operations (hardware BLK tied to 3.3V)
+    if (_brightness < 240 && ((reinterpret_cast<uintptr_t>(pxBuf) & 3U) == 0U)) {
+        uint32_t* px32 = reinterpret_cast<uint32_t*>(pxBuf);
+        size_t count32 = count >> 1;
+        if (_brightness <= 64) {
+            // 25% brightness: shift R/G/B right by 2 bits on 2 pixels in parallel
+            for (size_t i = 0; i < count32; ++i) {
+                uint32_t x = px32[i];
+                uint32_t v = ((x >> 8) & 0x00FF00FFU) | ((x & 0x00FF00FFU) << 8);
+                v = (v >> 2) & 0x39E739E7U;
+                px32[i] = ((v >> 8) & 0x00FF00FFU) | ((v & 0x00FF00FFU) << 8);
             }
-            uint16_t out = (r << 11) | (g << 5) | b;
-            pxBuf[i] = (out >> 8) | (out << 8);
+        } else if (_brightness <= 128) {
+            // 50% brightness: shift R/G/B right by 1 bit on 2 pixels in parallel
+            for (size_t i = 0; i < count32; ++i) {
+                uint32_t x = px32[i];
+                uint32_t v = ((x >> 8) & 0x00FF00FFU) | ((x & 0x00FF00FFU) << 8);
+                v = (v >> 1) & 0x7BEF7BEFU;
+                px32[i] = ((v >> 8) & 0x00FF00FFU) | ((v & 0x00FF00FFU) << 8);
+            }
+        } else {
+            // 75% brightness: 50% + 25% on 2 pixels in parallel (cannot overflow 5/6/5-bit channels)
+            for (size_t i = 0; i < count32; ++i) {
+                uint32_t x = px32[i];
+                uint32_t v = ((x >> 8) & 0x00FF00FFU) | ((x & 0x00FF00FFU) << 8);
+                v = ((v >> 1) & 0x7BEF7BEFU) + ((v >> 2) & 0x39E739E7U);
+                px32[i] = ((v >> 8) & 0x00FF00FFU) | ((v & 0x00FF00FFU) << 8);
+            }
         }
     }
 
@@ -260,8 +354,29 @@ void DisplayUI::drawGalleryPhoto(const char* filepath, uint16_t currentIdx, uint
         return;
     }
 
-    // 1. Verify file exists on SD card
-    if (!SD.exists(filepath)) {
+    auto drawBars = [&](const char* rightLabel, const char* footerLabel) {
+        // Compact 20px top & bottom bars leave a full 240x240 center viewport (y: 20..259)
+        _lcd.fillRect(0, 0, TFT_WIDTH, 20, 0x18C3);
+        _lcd.drawFastHLine(0, 19, TFT_WIDTH, 0xFD20);
+        _lcd.setTextSize(1);
+        _lcd.setTextColor(0xFD20, 0x18C3);
+        _lcd.drawString("GALLERY < / >", 6, 6);
+        _lcd.setTextColor(0xFFFF, 0x18C3);
+        _lcd.drawRightString(rightLabel, TFT_WIDTH - 6, 6);
+
+        _lcd.fillRect(0, TFT_HEIGHT - 20, TFT_WIDTH, 20, 0x18C3);
+        _lcd.drawFastHLine(0, TFT_HEIGHT - 20, TFT_WIDTH, 0x31A6);
+        _lcd.setTextColor(0x07FF, 0x18C3);
+        _lcd.drawCenterString(footerLabel, 120, TFT_HEIGHT - 14);
+    };
+
+    char idxStr[24];
+    snprintf(idxStr, sizeof(idxStr), "%d / %d", currentIdx, totalCount);
+
+    // 1. Open and read JPEG into static 512KB PSRAM buffer in one SPI2 burst
+    File f = SD.open(filepath, FILE_READ);
+    if (!f || f.size() <= 100) {
+        if (f) f.close();
         ESP_LOGW(TAG, "Gallery file missing: %s", filepath);
         _lcd.fillScreen(0x0821);
         _lcd.drawRect(16, 45, TFT_WIDTH - 32, 175, 0xF800);
@@ -275,30 +390,45 @@ void DisplayUI::drawGalleryPhoto(const char* filepath, uint16_t currentIdx, uint
         _lcd.drawCenterString("File not found on SD card", 120, 132);
         _lcd.setTextColor(0x07FF, 0x0821);
         _lcd.drawCenterString("< / > Skip | Hold D0: Del", 120, 165);
-
-        // Header and Footer
-        _lcd.fillRect(0, 0, TFT_WIDTH, 26, 0x18C3);
-        _lcd.drawFastHLine(0, 26, TFT_WIDTH, 0xFD20);
-        _lcd.setTextSize(1);
-        _lcd.setTextColor(0xFD20, 0x18C3);
-        _lcd.drawString("GALLERY (< / >)", 8, 9);
-        char idxStr[24];
-        snprintf(idxStr, sizeof(idxStr), "%d / %d", currentIdx, totalCount);
-        _lcd.setTextColor(0xFFFF, 0x18C3);
-        _lcd.drawRightString(idxStr, TFT_WIDTH - 8, 9);
-
-        _lcd.fillRect(0, TFT_HEIGHT - 26, TFT_WIDTH, 26, 0x18C3);
-        _lcd.drawFastHLine(0, TFT_HEIGHT - 26, TFT_WIDTH, 0x31A6);
-        _lcd.setTextColor(0x07FF, 0x18C3);
-        _lcd.drawCenterString(filepath, 120, TFT_HEIGHT - 17);
+        drawBars(idxStr, filepath);
         return;
     }
 
-    // 2. Inspect JPEG dimensions safely without crashing
+    size_t fsize = f.size();
+    size_t cap = 0;
+    uint8_t* jpgBuf = CameraDriver::getStaticBuffer(&cap);
+    uint8_t* jdPool = static_cast<uint8_t*>(heap_caps_malloc(4096, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+
+    GalleryDecodeCtx ctx = {};
+    bool fileOpen = true;
+    if (jpgBuf && fsize <= cap) {
+        size_t bytesRead = f.read(jpgBuf, fsize);
+        f.close();
+        fileOpen = false;
+        if (bytesRead == fsize) {
+            ctx.memBuf = jpgBuf;
+            ctx.memLen = fsize;
+            ctx.memPos = 0;
+        }
+    } else {
+        ctx.sdFile = &f;
+    }
+
+    lgfxJdec jpegdec;
     uint16_t jpgW = 0, jpgH = 0;
-    JRESULT sizeRes = TJpgDec.getSdJpgSize(&jpgW, &jpgH, filepath);
-    if (sizeRes != JDR_OK || jpgW == 0 || jpgH == 0) {
-        ESP_LOGW(TAG, "Corrupt JPEG in gallery: %s (err %d)", filepath, (int)sizeRes);
+    JRESULT prepRes = JDR_MEM1;
+    if (jdPool && (ctx.memBuf || ctx.sdFile)) {
+        prepRes = lgfx_jd_prepare(&jpegdec, lgfxGalleryReaderCb, jdPool, 4096, &ctx);
+        if (prepRes == JDR_OK) {
+            jpgW = jpegdec.width;
+            jpgH = jpegdec.height;
+        }
+    }
+
+    if (prepRes != JDR_OK || jpgW == 0 || jpgH == 0) {
+        if (fileOpen) f.close();
+        if (jdPool) heap_caps_free(jdPool);
+        ESP_LOGW(TAG, "Corrupt JPEG in gallery: %s (err=%d)", filepath, static_cast<int>(prepRes));
         _lcd.fillScreen(0x0821);
         _lcd.drawRect(16, 45, TFT_WIDTH - 32, 175, 0xF800);
         _lcd.setTextSize(2);
@@ -311,72 +441,102 @@ void DisplayUI::drawGalleryPhoto(const char* filepath, uint16_t currentIdx, uint
         _lcd.drawCenterString("Damaged file on SD card", 120, 132);
         _lcd.setTextColor(0x07FF, 0x0821);
         _lcd.drawCenterString("< / > Skip | Hold D0: Del", 120, 165);
-
-        // Header and Footer
-        _lcd.fillRect(0, 0, TFT_WIDTH, 26, 0x18C3);
-        _lcd.drawFastHLine(0, 26, TFT_WIDTH, 0xFD20);
-        _lcd.setTextSize(1);
-        _lcd.setTextColor(0xFD20, 0x18C3);
-        _lcd.drawString("GALLERY (< / >)", 8, 9);
-        char idxStr[24];
-        snprintf(idxStr, sizeof(idxStr), "%d / %d", currentIdx, totalCount);
-        _lcd.setTextColor(0xFFFF, 0x18C3);
-        _lcd.drawRightString(idxStr, TFT_WIDTH - 8, 9);
-
-        _lcd.fillRect(0, TFT_HEIGHT - 26, TFT_WIDTH, 26, 0x18C3);
-        _lcd.drawFastHLine(0, TFT_HEIGHT - 26, TFT_WIDTH, 0x31A6);
-        _lcd.setTextColor(0x07FF, 0x18C3);
-        _lcd.drawCenterString(filepath, 120, TFT_HEIGHT - 17);
+        drawBars(idxStr, filepath);
         return;
     }
 
     _lcd.fillScreen(0x0000);
 
-    // 3. Compute best scaling factor (1, 2, 4, 8) to fit in 240x224
-    uint8_t scale = 1;
-    if (jpgW > 800 || jpgH > 800) {
-        scale = 8;
-    } else if (jpgW > 400 || jpgH > 400) {
-        scale = 4;
-    } else if (jpgW > 240 || jpgH > 224) {
-        scale = 2;
+    const uint8_t scaleShift = (jpgW >= 1920 || jpgH >= 1440) ? 3
+                               : (jpgW >= 960 || jpgH >= 720) ? 2
+                               : (jpgW >= 480 || jpgH >= 360) ? 1
+                                                              : 0;
+    const uint8_t scale = static_cast<uint8_t>(1U << scaleShift);
+    const uint16_t decW = (jpgW + scale - 1U) / scale;
+    const uint16_t decH = (jpgH + scale - 1U) / scale;
+
+    uint16_t dstW = 240;
+    uint16_t dstH = 240;
+    if (jpgW >= jpgH) {
+        dstW = 240;
+        dstH = static_cast<uint16_t>((static_cast<uint32_t>(jpgH) * 240U + (jpgW / 2U)) / jpgW);
     } else {
-        scale = 1;
+        dstH = 240;
+        dstW = static_cast<uint16_t>((static_cast<uint32_t>(jpgW) * 240U + (jpgH / 2U)) / jpgH);
+    }
+    if (dstW == 0) dstW = 1;
+    if (dstH == 0) dstH = 1;
+    if (dstW > 240) dstW = 240;
+    if (dstH > 240) dstH = 240;
+
+    uint16_t* decBuf = static_cast<uint16_t*>(
+        heap_caps_malloc(static_cast<size_t>(decW) * decH * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    uint16_t* dstBuf = static_cast<uint16_t*>(
+        heap_caps_malloc(static_cast<size_t>(dstW) * dstH * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+
+    if (decBuf && dstBuf) {
+        memset(decBuf, 0, static_cast<size_t>(decW) * decH * sizeof(uint16_t));
+        ctx.decBuf = decBuf;
+        ctx.decW = decW;
+        ctx.decH = decH;
+        JRESULT decRes = lgfx_jd_decomp(&jpegdec, lgfxGalleryOutCb, scaleShift);
+        if (fileOpen) {
+            f.close();
+            fileOpen = false;
+        }
+
+        if (decRes == JDR_OK) {
+            for (uint16_t dy = 0; dy < dstH; ++dy) {
+                uint32_t sy = (static_cast<uint32_t>(dy) * decH) / dstH;
+                if (sy >= decH) sy = decH - 1U;
+                const uint16_t* srcRow = decBuf + sy * decW;
+                uint16_t* dstRow = dstBuf + static_cast<size_t>(dy) * dstW;
+                for (uint16_t dx = 0; dx < dstW; ++dx) {
+                    uint32_t sx = (static_cast<uint32_t>(dx) * decW) / dstW;
+                    if (sx >= decW) sx = decW - 1U;
+                    dstRow[dx] = srcRow[sx];
+                }
+                if ((dy & 0x3FU) == 0U) {
+                    yield();
+                }
+            }
+
+            int16_t posX = (TFT_WIDTH > dstW) ? (TFT_WIDTH - dstW) / 2 : 0;
+            int16_t posY = 20 + ((240 > dstH) ? (240 - dstH) / 2 : 0);
+            _lcd.startWrite();
+            _lcd.pushImage(posX, posY, dstW, dstH, reinterpret_cast<const lgfx::swap565_t*>(dstBuf));
+            _lcd.endWrite();
+        }
+    } else {
+        const uint8_t fbShift = (jpgW > 800 || jpgH > 800)   ? 3
+                                : (jpgW > 400 || jpgH > 400) ? 2
+                                : (jpgW > 240 || jpgH > 240) ? 1
+                                                             : 0;
+        const uint8_t fbScale = static_cast<uint8_t>(1U << fbShift);
+        uint16_t drawW = jpgW / fbScale;
+        uint16_t drawH = jpgH / fbScale;
+        ctx.decBuf = nullptr;
+        ctx.fbX = (TFT_WIDTH > drawW) ? (TFT_WIDTH - drawW) / 2 : 0;
+        ctx.fbY = 20 + ((240 > drawH) ? (240 - drawH) / 2 : 0);
+        _lcd.startWrite();
+        lgfx_jd_decomp(&jpegdec, lgfxGalleryOutCb, fbShift);
+        _lcd.endWrite();
+        if (fileOpen) {
+            f.close();
+            fileOpen = false;
+        }
     }
 
-    uint16_t drawW = jpgW / scale;
-    uint16_t drawH = jpgH / scale;
-    TJpgDec.setJpgScale(scale);
+    if (fileOpen) f.close();
+    if (decBuf) heap_caps_free(decBuf);
+    if (dstBuf) heap_caps_free(dstBuf);
+    if (jdPool) heap_caps_free(jdPool);
 
-    int16_t posX = (TFT_WIDTH > drawW) ? (TFT_WIDTH - drawW) / 2 : 0;
-    int16_t posY = 26 + ((224 > drawH) ? (224 - drawH) / 2 : 0);
-
-    // Lock SPI transaction during rendering for maximum speed and safety
-    _lcd.startWrite();
-    TJpgDec.drawSdJpg(posX, posY, filepath);
-    _lcd.endWrite();
-
-    if (drawW <= 236 && drawH <= 220) {
-        _lcd.drawRect(posX - 1, posY - 1, drawW + 2, drawH + 2, 0xFD20);
-    }
-
-    // Top Header
-    _lcd.fillRect(0, 0, TFT_WIDTH, 26, 0x18C3);
-    _lcd.drawFastHLine(0, 26, TFT_WIDTH, 0xFD20);
-    _lcd.setTextSize(1);
-    _lcd.setTextColor(0xFD20, 0x18C3);
-    _lcd.drawString("GALLERY (< / >)", 8, 9);
-
-    char idxStr[24];
-    snprintf(idxStr, sizeof(idxStr), "%d / %d", currentIdx, totalCount);
-    _lcd.setTextColor(0xFFFF, 0x18C3);
-    _lcd.drawRightString(idxStr, TFT_WIDTH - 8, 9);
-
-    // Bottom Footer - filename + controls hint
-    _lcd.fillRect(0, TFT_HEIGHT - 26, TFT_WIDTH, 26, 0x18C3);
-    _lcd.drawFastHLine(0, TFT_HEIGHT - 26, TFT_WIDTH, 0x31A6);
-    _lcd.setTextColor(0x07FF, 0x18C3);
-    _lcd.drawCenterString(filepath, 120, TFT_HEIGHT - 17);
+    const char* fname = strrchr(filepath, '/');
+    fname = fname ? (fname + 1) : filepath;
+    char footerStr[48];
+    snprintf(footerStr, sizeof(footerStr), "%s [%ux%u]", fname, jpgW, jpgH);
+    drawBars(idxStr, footerStr);
 }
 
 void DisplayUI::drawGalleryEmpty() {

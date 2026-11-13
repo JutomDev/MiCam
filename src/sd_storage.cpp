@@ -1,6 +1,8 @@
 #include "sd_storage.h"
 #include <algorithm>
-#include <utility>
+#include <stdlib.h>
+#include <string.h>
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 
 static const char* TAG = "SD_STORAGE";
@@ -9,15 +11,27 @@ bool SdStorage::_mounted = false;
 uint16_t SdStorage::_nextPhotoIndex = 1;
 uint64_t SdStorage::_totalBytes = 0;
 uint64_t SdStorage::_usedBytes = 0;
-std::vector<String> SdStorage::_photoFiles;
-std::vector<size_t> SdStorage::_photoSizes;
+SdStorage::PhotoEntry* SdStorage::_entries = nullptr;
+uint16_t SdStorage::_photoCount = 0;
+
+bool SdStorage::ensureCatalogAllocated() {
+    if (_entries) return true;
+    _entries = static_cast<PhotoEntry*>(
+        heap_caps_malloc(MAX_PHOTOS * sizeof(PhotoEntry), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!_entries) {
+        ESP_LOGE(TAG, "Failed to allocate PSRAM photo catalog!");
+        return false;
+    }
+    memset(_entries, 0, MAX_PHOTOS * sizeof(PhotoEntry));
+    return true;
+}
 
 bool SdStorage::init() {
     _mounted = false;
     _totalBytes = 0;
     _usedBytes = 0;
-    _photoFiles.clear();
-    _photoSizes.clear();
+    _photoCount = 0;
+    ensureCatalogAllocated();
 
     ESP_LOGI(TAG, "Initializing SPI for SD on SCK:%d MISO:%d MOSI:%d CS:%d", SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN,
              SD_CS_PIN);
@@ -72,12 +86,11 @@ bool SdStorage::isAvailable() {
 }
 
 void SdStorage::scanPhotos() {
-    _photoFiles.clear();
-    _photoSizes.clear();
+    _photoCount = 0;
     _usedBytes = 0;
     uint16_t maxIndex = 0;
 
-    if (!_mounted) return;
+    if (!_mounted || !ensureCatalogAllocated()) return;
 
     File root = SD.open(PHOTO_DIR);
     if (!root || !root.isDirectory()) {
@@ -85,52 +98,60 @@ void SdStorage::scanPhotos() {
         return;
     }
 
-    std::vector<std::pair<String, size_t>> entries;
+    uint16_t scanned = 0;
     File file = root.openNextFile();
     while (file) {
         if (!file.isDirectory()) {
-            String name = String(file.name());
-            // Ensure full path prefix /DCIM/...
-            if (!name.startsWith("/DCIM/")) {
-                if (name.startsWith("/")) {
-                    name = String(PHOTO_DIR) + name;
+            const char* rawName = file.name();
+            if (rawName && rawName[0] != '\0') {
+                char fullPath[32];
+                int n = 0;
+                if (strncmp(rawName, "/DCIM/", 6) == 0) {
+                    n = snprintf(fullPath, sizeof(fullPath), "%s", rawName);
+                } else if (rawName[0] == '/') {
+                    n = snprintf(fullPath, sizeof(fullPath), "%s%s", PHOTO_DIR, rawName);
                 } else {
-                    name = String(PHOTO_DIR) + "/" + name;
+                    n = snprintf(fullPath, sizeof(fullPath), "%s/%s", PHOTO_DIR, rawName);
                 }
-            }
-            size_t fsize = file.size();
-            if ((name.endsWith(".JPG") || name.endsWith(".jpg")) && fsize > 100) {
-                entries.push_back(std::make_pair(name, fsize));
-                _usedBytes += fsize;
 
-                // Parse index e.g. IMG_0042.JPG
-                int idxPos = name.indexOf("IMG_");
-                if (idxPos != -1) {
-                    String numStr = name.substring(idxPos + 4, idxPos + 8);
-                    uint16_t num = numStr.toInt();
-                    if (num > maxIndex) {
-                        maxIndex = num;
+                if (n > 5 && n < static_cast<int>(sizeof(fullPath))) {
+                    const char* ext = fullPath + (n - 4);
+                    if (strcmp(ext, ".JPG") == 0 || strcmp(ext, ".jpg") == 0) {
+                        size_t fsize = file.size();
+                        if (fsize > 100) {
+                            _usedBytes += fsize;
+                            const char* idxPtr = strstr(fullPath, "IMG_");
+                            if (idxPtr) {
+                                uint16_t num = static_cast<uint16_t>(strtoul(idxPtr + 4, nullptr, 10));
+                                if (num > maxIndex) {
+                                    maxIndex = num;
+                                }
+                            }
+                            if (_photoCount < MAX_PHOTOS) {
+                                memcpy(_entries[_photoCount].path, fullPath, sizeof(_entries[_photoCount].path));
+                                _entries[_photoCount].size = static_cast<uint32_t>(fsize);
+                                _photoCount++;
+                            }
+                        }
                     }
                 }
             }
         }
         file = root.openNextFile();
+        if ((++scanned & 0x07) == 0) {
+            vTaskDelay(1);
+        }
     }
     root.close();
 
-    std::sort(entries.begin(), entries.end(),
-              [](const std::pair<String, size_t>& a, const std::pair<String, size_t>& b) { return a.first < b.first; });
-
-    _photoFiles.reserve(entries.size());
-    _photoSizes.reserve(entries.size());
-    for (const auto& e : entries) {
-        _photoFiles.push_back(e.first);
-        _photoSizes.push_back(e.second);
+    if (_photoCount > 1) {
+        std::sort(_entries, _entries + _photoCount,
+                  [](const PhotoEntry& a, const PhotoEntry& b) { return strcmp(a.path, b.path) < 0; });
     }
 
     _nextPhotoIndex = maxIndex + 1;
-    ESP_LOGI(TAG, "Scan complete: %d photos found (%llu KB). Next index: %d", (int)_photoFiles.size(),
-             _usedBytes / 1024, _nextPhotoIndex);
+    ESP_LOGI(TAG, "Scan complete: %u photos found (%llu KB). Next index: %u", (unsigned)_photoCount, _usedBytes / 1024,
+             (unsigned)_nextPhotoIndex);
 }
 
 void SdStorage::refreshList() {
@@ -138,11 +159,14 @@ void SdStorage::refreshList() {
 }
 
 uint16_t SdStorage::getPhotoCount() {
-    return (uint16_t)_photoFiles.size();
+    return _photoCount;
 }
 
-const std::vector<String>& SdStorage::getPhotoList() {
-    return _photoFiles;
+const char* SdStorage::getPhotoPath(size_t index) {
+    if (_entries && index < _photoCount) {
+        return _entries[index].path;
+    }
+    return "";
 }
 
 bool SdStorage::savePhoto(const uint8_t* buffer, size_t len, char* outFilename, size_t maxLen) {
@@ -178,8 +202,11 @@ bool SdStorage::savePhoto(const uint8_t* buffer, size_t len, char* outFilename, 
     float elapsedSec = (tElapsed > 0) ? (tElapsed / 1000.0f) : 0.001f;
     ESP_LOGI(TAG, "Saved %s in %u ms (%.2f KB/s)", filename, tElapsed, (len / 1024.0f) / elapsedSec);
 
-    _photoFiles.push_back(String(filename));
-    _photoSizes.push_back(len);
+    if (ensureCatalogAllocated() && _photoCount < MAX_PHOTOS) {
+        snprintf(_entries[_photoCount].path, sizeof(_entries[_photoCount].path), "%s", filename);
+        _entries[_photoCount].size = static_cast<uint32_t>(len);
+        _photoCount++;
+    }
     _usedBytes += len;
     _nextPhotoIndex++;
 
@@ -196,7 +223,20 @@ bool SdStorage::deletePhoto(const char* filename) {
 
     if (SD.remove(filename)) {
         ESP_LOGI(TAG, "Deleted file: %s", filename);
-        scanPhotos();
+        if (_entries) {
+            for (uint16_t i = 0; i < _photoCount; ++i) {
+                if (strcmp(_entries[i].path, filename) == 0) {
+                    uint64_t sz = _entries[i].size;
+                    _usedBytes = (_usedBytes >= sz) ? (_usedBytes - sz) : 0;
+                    if (i + 1U < _photoCount) {
+                        memmove(&_entries[i], &_entries[i + 1U],
+                                static_cast<size_t>(_photoCount - 1U - i) * sizeof(PhotoEntry));
+                    }
+                    _photoCount--;
+                    break;
+                }
+            }
+        }
         return true;
     }
 
@@ -206,10 +246,12 @@ bool SdStorage::deletePhoto(const char* filename) {
 
 size_t SdStorage::getPhotoSize(const char* filename) {
     if (!_mounted || !filename) return 0;
-    auto it = std::find(_photoFiles.begin(), _photoFiles.end(), filename);
-    if (it != _photoFiles.end()) {
-        size_t idx = std::distance(_photoFiles.begin(), it);
-        return _photoSizes[idx];
+    if (_entries) {
+        for (uint16_t i = 0; i < _photoCount; ++i) {
+            if (strcmp(_entries[i].path, filename) == 0) {
+                return _entries[i].size;
+            }
+        }
     }
     File file = SD.open(filename, FILE_READ);
     if (!file) return 0;
@@ -219,8 +261,8 @@ size_t SdStorage::getPhotoSize(const char* filename) {
 }
 
 size_t SdStorage::getPhotoSizeByIndex(size_t index) {
-    if (index < _photoSizes.size()) {
-        return _photoSizes[index];
+    if (_entries && index < _photoCount) {
+        return _entries[index].size;
     }
     return 0;
 }

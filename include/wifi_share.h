@@ -22,6 +22,7 @@ private:
     static bool _eventsRegistered;
 
     static void handleRoot();
+    static void handleGalleryPage();
     static void handleSnapshot();
     static void handleCapture();
     static void handlePreset();
@@ -33,6 +34,8 @@ private:
     static void handleDownload();
     static void handleView();
     static void handleDelete();
+    static void handleDiag();
+    static void handleCaptiveRedirect();
     static void handleNoContent();
     static void handleNotFound();
 };

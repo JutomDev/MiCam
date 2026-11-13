@@ -18,6 +18,9 @@ public:
     static void returnFrame(camera_fb_t* fb);
     static bool captureJpeg(uint8_t** outJpg, size_t* outLen, uint8_t quality = 90);
     static bool captureJpegStatic(const uint8_t** outJpg, size_t* outLen, uint8_t quality = 80);
+    static bool captureNightBurstStatic(const uint8_t** outJpg, size_t* outLen, uint8_t quality = 90);
+    static bool captureStreamJpegStatic(const uint8_t** outJpg, size_t* outLen);
+    static uint8_t* getStaticBuffer(size_t* outCapacity);
     static void applyPresetEffect(uint16_t* rgb565_buf, size_t pixelCount);
     static void applyPreset(CameraPreset preset);
     static const char* getPresetName(CameraPreset preset);

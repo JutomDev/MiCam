@@ -8,6 +8,7 @@
 #include "audio_mic.h"
 #include "buzzer.h"
 #include "minigame.h"
+#include "sys_diag.h"
 #include "esp_log.h"
 #include "esp_system.h"
 
@@ -58,18 +59,22 @@ static void enterState(CameraState newState) {
             DisplayUI::getLcd().fillScreen(0x0000);
             DisplayUI::invalidateHud();
             CameraDriver::setModePreview();
+            frameCount = 0;
+            lastFpsTime = millis();
             break;
 
         case STATE_GALLERY: {
             Buzzer::stop();
-            SdStorage::refreshList();
-            const std::vector<String>& list = SdStorage::getPhotoList();
-            if (list.empty()) {
+            if (SdStorage::isAvailable() && SdStorage::getPhotoCount() == 0) {
+                SdStorage::refreshList();
+            }
+            uint16_t count = SdStorage::getPhotoCount();
+            if (count == 0) {
                 DisplayUI::drawGalleryEmpty();
                 galleryPhotoIndex = 0;
             } else {
-                galleryPhotoIndex = static_cast<int>(list.size()) - 1;
-                DisplayUI::drawGalleryPhoto(list[galleryPhotoIndex].c_str(), galleryPhotoIndex + 1, list.size());
+                galleryPhotoIndex = static_cast<int>(count) - 1;
+                DisplayUI::drawGalleryPhoto(SdStorage::getPhotoPath(galleryPhotoIndex), galleryPhotoIndex + 1, count);
             }
             break;
         }
@@ -102,6 +107,7 @@ static void enterState(CameraState newState) {
 // ============================================================================
 static void handleCapture() {
     ESP_LOGI(TAG, "Executing photo capture...");
+    SysDiag::logReport(TAG, "PRE_CAPTURE", -1.0f, true);
     Buzzer::playCatMii();
 
 #if USE_TALLY_LED
@@ -109,7 +115,8 @@ static void handleCapture() {
 #endif
 
     DisplayUI::drawFlashAnimation();
-    DisplayUI::drawSavingProgress("ENCODING JPEG...");
+    DisplayUI::drawSavingProgress((CameraDriver::getCurrentPreset() == PRESET_NIGHT) ? "NIGHT BURST 5x..."
+                                                                                     : "ENCODING JPEG...");
 
     const uint8_t* jpgBuf = nullptr;
     size_t jpgLen = 0;
@@ -119,6 +126,7 @@ static void handleCapture() {
         digitalWrite(LED_TALLY_PIN, LOW);
 #endif
         DisplayUI::showMessage("CAM ERROR", "Capture failed", 700);
+        SysDiag::logReport(TAG, "POST_CAPTURE_ERR", -1.0f, true);
         enterState(STATE_LIVE_VIEW);
         return;
     }
@@ -152,6 +160,7 @@ static void handleCapture() {
         DisplayUI::showMessage("NO SD CARD", "Insert FAT32 SD", 900);
     }
 
+    SysDiag::logReport(TAG, "POST_CAPTURE", -1.0f, true);
     enterState(STATE_LIVE_VIEW);
 }
 
@@ -204,6 +213,13 @@ static void handleLiveView(uint32_t now) {
         }
     }
 
+    // Pace Live View polling to <= ~18 FPS (55 ms) to reduce SPI3/PSRAM DMA contention & heat
+    static uint32_t lastFrameTime = 0;
+    if (now - lastFrameTime < 55) {
+        return;
+    }
+    lastFrameTime = now;
+
     camera_fb_t* fb = CameraDriver::getFrame();
     if (fb) {
         DisplayUI::drawLiveView(fb->buf, fb->width, fb->height,
@@ -212,20 +228,23 @@ static void handleLiveView(uint32_t now) {
         CameraDriver::returnFrame(fb);
 
         frameCount++;
-        if (now - lastFpsTime >= 2000) {
+        if (now - lastFpsTime >= 5000) {
             float fps = frameCount * 1000.0f / (now - lastFpsTime);
-            ESP_LOGI(TAG, "LiveView FPS: %.1f | Heap: %u | PSRAM: %u", fps, ESP.getFreeHeap(), ESP.getFreePsram());
+            SysDiag::logReport(TAG, "LIVE_VIEW", fps, false);
             frameCount = 0;
             lastFpsTime = now;
         }
+    } else {
+        DisplayUI::drawHud(CameraDriver::getPresetName(CameraDriver::getCurrentPreset()), SdStorage::getPhotoCount(),
+                           SdStorage::isAvailable());
     }
 }
 
 static void handleGallery() {
-    std::vector<String> list = SdStorage::getPhotoList();
+    uint16_t count = SdStorage::getPhotoCount();
     JoyDirection joy = joystick.getDirection(millis());
 
-    if (list.empty()) {
+    if (count == 0) {
         if (btnNav.shortClicked || btnShutter.shortClicked || joy != JOY_NONE) {
             Buzzer::playUiTick();
             enterState(STATE_MENU);
@@ -233,33 +252,42 @@ static void handleGallery() {
         return;
     }
 
+    if (galleryPhotoIndex >= static_cast<int>(count)) {
+        galleryPhotoIndex = static_cast<int>(count) - 1;
+    }
+    if (galleryPhotoIndex < 0) {
+        galleryPhotoIndex = 0;
+    }
+
     if (btnShutter.longClicked) {
-        String toDelete = list[galleryPhotoIndex];
-        ESP_LOGI(TAG, "Deleting photo from gallery: %s", toDelete.c_str());
+        char toDelete[32];
+        strncpy(toDelete, SdStorage::getPhotoPath(galleryPhotoIndex), sizeof(toDelete) - 1);
+        toDelete[sizeof(toDelete) - 1] = '\0';
+        ESP_LOGI(TAG, "Deleting photo from gallery: %s", toDelete);
         Buzzer::playCountdownTick();
-        DisplayUI::showMessage("DELETING...", toDelete.c_str(), 100);
-        SdStorage::deletePhoto(toDelete.c_str());
-        list = SdStorage::getPhotoList();
-        if (list.empty()) {
+        DisplayUI::showMessage("DELETING...", toDelete, 100);
+        SdStorage::deletePhoto(toDelete);
+        count = SdStorage::getPhotoCount();
+        if (count == 0) {
             DisplayUI::drawGalleryEmpty();
             galleryPhotoIndex = 0;
         } else {
-            if (galleryPhotoIndex >= static_cast<int>(list.size())) {
-                galleryPhotoIndex = static_cast<int>(list.size()) - 1;
+            if (galleryPhotoIndex >= static_cast<int>(count)) {
+                galleryPhotoIndex = static_cast<int>(count) - 1;
             }
-            DisplayUI::drawGalleryPhoto(list[galleryPhotoIndex].c_str(), galleryPhotoIndex + 1, list.size());
+            DisplayUI::drawGalleryPhoto(SdStorage::getPhotoPath(galleryPhotoIndex), galleryPhotoIndex + 1, count);
         }
         return;
     }
 
     if (btnNav.shortClicked || joy == JOY_LEFT) {
         Buzzer::playUiTick();
-        galleryPhotoIndex = (galleryPhotoIndex > 0) ? (galleryPhotoIndex - 1) : (static_cast<int>(list.size()) - 1);
-        DisplayUI::drawGalleryPhoto(list[galleryPhotoIndex].c_str(), galleryPhotoIndex + 1, list.size());
+        galleryPhotoIndex = (galleryPhotoIndex > 0) ? (galleryPhotoIndex - 1) : (static_cast<int>(count) - 1);
+        DisplayUI::drawGalleryPhoto(SdStorage::getPhotoPath(galleryPhotoIndex), galleryPhotoIndex + 1, count);
     } else if (btnShutter.shortClicked || joy == JOY_RIGHT) {
         Buzzer::playUiTick();
-        galleryPhotoIndex = (galleryPhotoIndex + 1) % static_cast<int>(list.size());
-        DisplayUI::drawGalleryPhoto(list[galleryPhotoIndex].c_str(), galleryPhotoIndex + 1, list.size());
+        galleryPhotoIndex = (galleryPhotoIndex + 1) % static_cast<int>(count);
+        DisplayUI::drawGalleryPhoto(SdStorage::getPhotoPath(galleryPhotoIndex), galleryPhotoIndex + 1, count);
     } else if (btnNav.longClicked || joy == JOY_UP || joy == JOY_DOWN) {
         Buzzer::playUiTick();
         enterState(STATE_MENU);

@@ -2,7 +2,7 @@
 #include "buzzer.h"
 #include "driver/i2s.h"
 #include "esp_log.h"
-#include <math.h>
+#include <stdlib.h>
 
 static const char* TAG = "AUDIO_MIC";
 
@@ -17,8 +17,8 @@ bool AudioMic::_clapDetected = false;
 uint32_t AudioMic::_lastClapTime = 0;
 bool AudioMic::_countdownActive = false;
 uint32_t AudioMic::_countdownRemainingMs = 0;
-float AudioMic::_prevSample = 0.0f;
-float AudioMic::_prevFilter = 0.0f;
+int32_t AudioMic::_prevSample = 0;
+int32_t AudioMic::_prevFilter = 0;
 static uint32_t _lastBuzzerPlayTime = 0;
 
 #define I2S_PORT I2S_NUM_0
@@ -78,15 +78,16 @@ void AudioMic::update(uint32_t now) {
 
         size_t num_samples = bytes_read / sizeof(int16_t);
         for (size_t i = 0; i < num_samples; i++) {
-            float in_sample = (float)samples[i];
+            int32_t in_q8 = static_cast<int32_t>(samples[i]) << 8;
 
-            // 1-pole digital high-pass filter:
+            // 1-pole fixed-point Q8 high-pass filter (alpha = 238/256 ≈ 0.93):
             // Eliminates DC offset and low-frequency rumble < 250 Hz while preserving sharp clap attacks
-            float filtered = 0.93f * (_prevFilter + in_sample - _prevSample);
-            _prevSample = in_sample;
-            _prevFilter = filtered;
+            int32_t filtered_q8 =
+                static_cast<int32_t>((238LL * (static_cast<int64_t>(_prevFilter) + in_q8 - _prevSample)) >> 8);
+            _prevSample = in_q8;
+            _prevFilter = filtered_q8;
 
-            int32_t val = (int32_t)fabsf(filtered);
+            int32_t val = abs(filtered_q8 >> 8);
 
             // Digital gain amplification
             val *= _gain;

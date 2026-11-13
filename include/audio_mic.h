@@ -32,6 +32,6 @@ private:
     static uint32_t _lastClapTime;
     static bool _countdownActive;
     static uint32_t _countdownRemainingMs;
-    static float _prevSample;
-    static float _prevFilter;
+    static int32_t _prevSample;
+    static int32_t _prevFilter;
 };

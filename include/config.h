@@ -27,9 +27,9 @@
 #define CAM_PIN_HREF 47
 #define CAM_PIN_PCLK 13
 
-// Camera sensor orientation in physical housing (180-degree rotation: vflip + hmirror)
+// Camera sensor orientation in physical housing (vertical flip enabled, horizontal mirror disabled)
 #define CAM_VFLIP 1
-#define CAM_HMIRROR 1
+#define CAM_HMIRROR 0
 
 // ============================================================================
 // 2. MICROSD CARD PINOUT (Onboard slot on Sense expansion board)
