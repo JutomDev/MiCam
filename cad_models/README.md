@@ -131,16 +131,17 @@ Use flexible 28-30 AWG silicone wire. Make point-to-point connections according 
 
 | Wire Signal | Source Component | Target Pin on XIAO ESP32-S3 | Wiring Notes |
 | :--- | :--- | :--- | :--- |
-| **LCD SCLK** | Display Header Pin 2 | **D1 (GPIO 2)** | High-speed SPI3 HSPI clock line. |
-| **LCD MOSI** | Display Header Pin 3 | **D2 (GPIO 3)** | High-speed SPI3 data line. |
+| **LCD SCLK** | Display Header Pin 2 | **D1 (GPIO 2)** | High-speed SPI3 HSPI clock line (27 MHz). |
+| **LCD MOSI / DIN** | Display Header Pin 3 | **D2 (GPIO 3)** | High-speed SPI3 data line. |
 | **LCD DC** | Display Header Pin 4 | **D3 (GPIO 4)** | Data/Command selector line. |
+| **LCD RST** | Display Header Pin 5 | **D6 (GPIO 43)** | Hardware Reset ST7789 (niezbędny do pewnej inicjalizacji). |
 | **LCD BLK** | Display Header Pin 7 | **3.3V (via 22-47Ω)** | Fixed backlight illumination. |
 | **LCD GND / CS** | Display Pins 1 & 8 | **GND** | Direct ground connection (CS tied low for 1-device SPI3). |
-| **Joystick X** | Joystick VRx Tab | **D0 (GPIO 1, ADC1_CH0)** | Analog horizontal input. |
-| **Joystick Y** | Joystick VRy Tab | **D4 (GPIO 5, ADC1_CH4)** | Analog vertical input. |
-| **Shutter Switch** | 12mm Tact Switch Pin | **D6 (GPIO 43)** | Internal pullup enabled in firmware; opposite pin to GND. |
-| **Piezo Buzzer** | Buzzer (+) Lead | **D5 (GPIO 6, PWM)** | LEDC hardware PWM Channel 7; (-) lead to GND. |
-| **Tally LED** | 3mm LED Anode | **D7 (GPIO 44, via 1kΩ)** | Shutter countdown visual indicator; Cathode to GND. |
+| **Joystick X** | Joystick VRx Tab | **D5 (GPIO 6, ADC1_CH5)** | Analog horizontal input (Oś X). |
+| **Joystick Y** | Joystick VRy Tab | **D4 (GPIO 5, ADC1_CH4)** | Analog vertical input (Oś Y). |
+| **Shutter Switch** | 12mm Tact Switch Pin | **D0 (GPIO 1)** | Dedicated shutter button with internal pullup; opposite pin to GND. |
+| **Piezo Buzzer** | Buzzer (+) Lead | **D7 (GPIO 44, PWM)** | LEDC hardware PWM Channel 7; (-) lead to GND. |
+| **Tally LED** | 3mm LED Anode | **N/A (Opcjonalny)** | Wyłączony w firmware dla uniknięcia kolizji na listwie zewnętrznej. |
 | **Battery (+) / (-)**| LiPo Red / Black | **BAT+ / BAT- Pads** | Solder directly to lithium charging pads on XIAO bottom. |
 | **Power Switch** | Slide Switch Common | **EN Pin (XIAO)** | Toggle connects EN to GND to enter ultra-low power shutdown. |
 

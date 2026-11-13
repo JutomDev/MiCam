@@ -4,7 +4,7 @@
 [![Build Status](https://img.shields.io/badge/Build-PlatformIO%20Passed-success?style=flat-square&logo=platformio)](https://platformio.org/)
 [![Hardware](https://img.shields.io/badge/SoC-ESP32--S3%20Octal--PSRAM-orange?style=flat-square&logo=espressif)](https://www.espressif.com/)
 [![Sensor](https://img.shields.io/badge/Optics-Omnivision%20OV2640%20UXGA-blue?style=flat-square)](https://www.ovt.com/)
-[![Display](https://img.shields.io/badge/Display-ST7789%20IPS%201.69%22%2040MHz-purple?style=flat-square)](https://www.waveshare.com/)
+[![Display](https://img.shields.io/badge/Display-ST7789%20IPS%201.69%22%2027MHz-purple?style=flat-square)](https://www.waveshare.com/)
 [![CAD](https://img.shields.io/badge/CAD-Autodesk%20Fusion%20360%20DFM-red?style=flat-square&logo=autodesk)](https://www.autodesk.com/products/fusion-360)
 
 <p align="center">
@@ -24,15 +24,15 @@ To guarantee deterministic framerates, zero audio dropouts, and prevent SPI DMA 
 graph TD
     ESP[Seeed Studio XIAO ESP32-S3 Sense] -->|DVP 8-bit Data + SCCB| CAM[Omnivision OV2640 UXGA Camera]
     ESP -->|SPI2_HOST 25MHz FSPI| SD[MicroSD FAT32 Storage]
-    ESP -->|SPI3_HOST 40MHz HSPI| LCD[Waveshare 1.69 IPS LCD ST7789]
+    ESP -->|SPI3_HOST 27MHz HSPI| LCD[Waveshare 1.69 IPS LCD ST7789]
     ESP -->|I2S PDM Controller| MIC[Internal MEMS Microphone]
-    ESP -->|LEDC PWM Channel 7| BUZ[Piezo Chiptune Buzzer]
-    ESP -->|ADC1 Channels 0 & 4| JOY[PSP-1000 2D Analog Joystick]
-    ESP -->|GPIO 43 Input Pullup| SHT[Mechanical Shutter Switch]
-    ESP -->|GPIO 44 Output| LED[Signal Tally LED]
+    ESP -->|LEDC PWM Channel 7| BUZ[Piezo Chiptune Buzzer Pin D7]
+    ESP -->|ADC1 Channels 4 & 5| JOY[PSP-1000 2D Analog Joystick D4/D5]
+    ESP -->|GPIO 1 Input Pullup| SHT[Mechanical Shutter Switch Pin D0]
+    ESP -->|GPIO 43 Output| RST[ST7789 Hardware Reset Pin D6]
 ```
 
-### Complete Hardware Pinout Map
+### Complete Hardware Pinout Map (Zweryfikowany układ fizyczny)
 
 | Subsystem | Bus / Protocol | ESP32-S3 GPIO | Physical Pin | Engineering Notes |
 | :--- | :--- | :--- | :--- | :--- |
@@ -40,19 +40,19 @@ graph TD
 | **DVP Camera Control**| SCCB / Clock Lines | XCLK: 10, PCLK: 13, VSYNC: 38, HREF: 47, SDA: 40, SCL: 39 | Sense B2B | 20 MHz XCLK generated via LEDC timer. |
 | **MicroSD Card** | SPI2 (FSPI) | **CS: 21**, SCK: 7, MISO: 8, MOSI: 9 | Sense B2B / D8-D10 | 25 MHz FAT32 write operations with custom EXIF injection. |
 | **Digital PDM Mic** | I2S PDM RX | **DATA: 41**, **CLK: 42** | Internal B2B | Dedicated internal lines; zero conflict with external headers. |
-| **ST7789 IPS Display**| SPI3 (HSPI) | SCLK: D1 (2), MOSI: D2 (3), DC: D3 (4) | D1, D2, D3 | 40 MHz SPI via LovyanGFX. Screen CS wired to GND; RST to 3.3V. |
-| **2D Analog Joystick**| Dual ADC1 | **X-Axis: D0 (GPIO 1)**, **Y-Axis: D4 (GPIO 5)** | D0, D4 | Dedicated hardware ADC channels for directional navigation. |
-| **Shutter Button** | Digital GPIO | **D6 (GPIO 43)** | D6 | Tactile button with non-blocking 30 ms debounce & long-press. |
-| **Tally LED** | Digital Output | **D7 (GPIO 44)** | D7 | Visual shutter countdown and photo save confirmation. |
-| **Piezo Buzzer** | LEDC PWM | **D5 (GPIO 6)** | D5 | 8-bit non-blocking chiptune tone generator (Channel 7). |
+| **ST7789 IPS Display**| SPI3 (HSPI) | **SCLK: D1 (2), MOSI/DIN: D2 (3), DC: D3 (4), RST: D6 (43)** | D1, D2, D3, D6 | LovyanGFX SPI Mode 3. CS na stałe do GND; sprzętowy reset na D6. |
+| **2D Analog Joystick**| Dual ADC1 | **Oś X: D5 (GPIO 6)**, **Oś Y: D4 (GPIO 5)** | D4, D5 | Dedykowane kanały ADC1 do pełnej nawigacji menu i galerią. |
+| **Piezo Buzzer (Głośnik)**| LEDC PWM | **D7 (GPIO 44)** | D7 | Sprzętowy timer PWM (Channel 7) – dźwięki migawki i Mii chimes. |
+| **Shutter Button** | Digital GPIO | **D0 (GPIO 1)** | D0 | Dedykowany przycisk migawki z programowym debouncingiem. |
+| **Tally LED (Opcja)** | Digital Output | N/A (opcjonalny) | - | Wyłączony w firmware, aby uniknąć konfliktów z buzzerem na D7. |
 
 ---
 
 ## 2. Firmware Highlights
 
-* **Zero-Leak Memory Architecture:** Framebuffers are pre-allocated in 8MB Octal PSRAM at startup (`FRAMESIZE_UXGA`). Dynamic switching between 240x240 RGB565 Live View and UXGA JPEG capture occurs without DMA pool reallocations.
+* **Zero-Leak Memory Architecture:** Framebuffers are pre-allocated in 8MB Octal PSRAM at startup (`FRAMESIZE_UXGA`). Dynamic switching between 240x240 RGB565 Live View and UXGA JPEG capture occurs without DMA pool reallocations. High-quality JPEG compression uses a dedicated pre-allocated 96 KB PSRAM buffer (`captureJpegStatic`) via `fmt2jpg_cb()`, completely eliminating dynamic 128 KB heap malloc/free thrashing in hot loops.
 * **Non-Blocking State Machine:** 100% cooperative multitasking loop based on `millis()`. Zero blocking `delay()` calls in the main loop.
-* **LovyanGFX Display Engine:** Dedicated 40 MHz SPI DMA driver for ST7789. On 240x280 panels, the 240x240 camera viewfinder is preserved 1:1, leaving a dedicated 40px bottom telemetry HUD bar (photo counter, preset badge, SD status).
+* **LovyanGFX Display Engine:** Dedicated 27 MHz SPI DMA driver for ST7789 on SPI3_HOST. On 240x280 panels, the 240x240 camera viewfinder is preserved 1:1, leaving a dedicated 40px bottom telemetry HUD bar (photo counter, preset badge, SD status).
 * **Direct Hardware ISP Tuning:** Real-time register control of Omnivision OV2640 DSP for 6 photographic presets:
   1. `AUTO ISP`: Lens shading correction, black/hot pixel removal, nonlinear raw gamma, and AEC2 matrix exposure.
   2. `BRIGHT DAY`: Highlight clipping protection, low ISO gain ceiling (2x), vivid saturation (+2), crisp hardware edge enhancement.
@@ -61,8 +61,9 @@ graph TD
   5. `RETRO Y2K`: Early 2000s digicam look with natural corner vignetting, vintage gamma curve, and organic sensor noise.
   6. `LOMOGRAPHY CROSS`: Strong vignette, saturated color shifts, cross-processed aesthetic.
 * **Acoustic Clap Shutter:** Real-time digital 1-pole high-pass filter running on I2S PDM samples, filtering ambient rumble (< 250 Hz) and triggering a 2-second rhythmic countdown upon detecting a sharp clap impulse.
-* **Chiptune Piezo Audio:** Asynchronous note sequencer playing retro audio cues: Nintendo Wii Mii Channel melody, iconic "Mii-ii!" greeting, and mechanical shutter clicks.
-* **SoftAP Web Control Console & Captive Portal:** Built-in Wi-Fi access point (`MIphoto-cam`) with mDNS (`http://miphoto.local`) and Captive Portal DNS redirection. Provides live mobile streaming, remote shutter trigger, acoustic VU meter calibration, and full gallery file downloads.
+* **Chiptune Piezo Audio & Mute Control:** Asynchronous note sequencer playing retro audio cues: Nintendo Wii Mii Channel melody, iconic "Mii-ii!" greeting, and mechanical shutter clicks. Includes a 7-entry settings menu with hardware speaker mute option (**muted by default** on boot to prevent noise, toggleable via camera menu and web console).
+* **SoftAP Web Control Console & Brownout Protection:** Built-in Wi-Fi access point (`MIphoto-cam`) with mDNS (`http://miphoto.local`) and Captive Portal DNS redirection. Stabilized with `11 dBm` TX power ceiling, chunked Flash PROGMEM streaming, and connection caps to prevent RF PA brownout resets even without an external U.FL antenna. Provides live mobile streaming, remote shutter trigger, acoustic VU meter calibration, speaker mute toggle, and full gallery file downloads.
+* **Hardware Invariant on Battery Telemetry:** Seeed Studio XIAO ESP32-S3 Sense features an onboard lithium charging circuit with dedicated CHG LED, but lacks an internal resistive voltage divider to an internal ADC pin. Because all 11 external headers (`D0`–`D10`) are 100% committed to camera, display, microSD, joystick, and buzzer subsystems, battery charge status is monitored via the onboard hardware LED.
 
 ---
 

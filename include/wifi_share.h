@@ -19,6 +19,7 @@ private:
     static WebServer _server;
     static DNSServer _dnsServer;
     static bool _running;
+    static bool _eventsRegistered;
 
     static void handleRoot();
     static void handleSnapshot();
@@ -26,10 +27,12 @@ private:
     static void handlePreset();
     static void handleAudioLevel();
     static void handleToggleClap();
+    static void handleToggleMute();
     static void handleAudioThreshold();
     static void handleAudioGain();
     static void handleDownload();
     static void handleView();
     static void handleDelete();
+    static void handleNoContent();
     static void handleNotFound();
 };

@@ -1,0 +1,29 @@
+CompileFlags:
+  Compiler: C:/Users/Julek/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-g++.exe
+  Remove:
+    - -mfix-esp32-psram-cache-issue
+    - -mlongcalls
+    - -fstrict-volatile-bitfields
+    - -fno-tree-switch-conversion
+    - -fno-jump-tables
+    - -freorder-blocks
+    - -MMD
+  Add:
+    - --target=xtensa-esp32s3-elf
+    - -isystem
+    - C:/Users/Julek/.platformio/packages/toolchain-xtensa-esp32s3/xtensa-esp32s3-elf/include/c++/8.4.0
+    - -isystem
+    - C:/Users/Julek/.platformio/packages/toolchain-xtensa-esp32s3/xtensa-esp32s3-elf/include/c++/8.4.0/xtensa-esp32s3-elf
+    - -isystem
+    - C:/Users/Julek/.platformio/packages/toolchain-xtensa-esp32s3/xtensa-esp32s3-elf/include/c++/8.4.0/backward
+    - -isystem
+    - C:/Users/Julek/.platformio/packages/toolchain-xtensa-esp32s3/lib/gcc/xtensa-esp32s3-elf/8.4.0/include
+    - -isystem
+    - C:/Users/Julek/.platformio/packages/toolchain-xtensa-esp32s3/lib/gcc/xtensa-esp32s3-elf/8.4.0/include-fixed
+    - -isystem
+    - C:/Users/Julek/.platformio/packages/toolchain-xtensa-esp32s3/xtensa-esp32s3-elf/include
+    - -I${workspaceFolder}/include
+    - -I${workspaceFolder}/src
+    - -DARDUINO_XIAO_ESP32S3
+    - -DESP32
+    - -DBOARD_HAS_PSRAM

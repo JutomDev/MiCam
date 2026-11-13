@@ -1,4 +1,5 @@
 #include "audio_mic.h"
+#include "buzzer.h"
 #include "driver/i2s.h"
 #include "esp_log.h"
 #include <math.h>
@@ -6,9 +7,9 @@
 static const char* TAG = "AUDIO_MIC";
 
 bool AudioMic::_initialized = false;
-bool AudioMic::_clapEnabled = true;   // Enabled by default
-uint16_t AudioMic::_threshold = 160;  // Calibrated clap threshold (16% full-scale at 3x gain)
-uint8_t AudioMic::_gain = 3;          // 3x digital gain for MEMS PDM microphone
+bool AudioMic::_clapEnabled = false;  // Disabled by default at boot to prevent ambient noise auto-captures
+uint16_t AudioMic::_threshold = 350;  // Higher threshold (35% full-scale) to ignore normal voice/speaker sound
+uint8_t AudioMic::_gain = 2;          // 2x digital gain for MEMS PDM microphone
 uint16_t AudioMic::_currentLevel = 0;
 uint16_t AudioMic::_peakHoldLevel = 0;
 uint32_t AudioMic::_lastPeakTime = 0;
@@ -18,6 +19,7 @@ bool AudioMic::_countdownActive = false;
 uint32_t AudioMic::_countdownRemainingMs = 0;
 float AudioMic::_prevSample = 0.0f;
 float AudioMic::_prevFilter = 0.0f;
+static uint32_t _lastBuzzerPlayTime = 0;
 
 #define I2S_PORT I2S_NUM_0
 
@@ -115,8 +117,12 @@ void AudioMic::update(uint32_t now) {
         }
     }
 
-    // Clap impulse detection
-    if (_clapEnabled && (_currentLevel >= _threshold)) {
+    if (Buzzer::isPlaying()) {
+        _lastBuzzerPlayTime = now;
+    }
+
+    // Clap impulse detection (ignored while speaker is playing + 350ms acoustic decay window)
+    if (_clapEnabled && !Buzzer::isPlaying() && (now - _lastBuzzerPlayTime > 350) && (_currentLevel >= _threshold)) {
         // Anti-retrigger lockout (2.5 second cooldown)
         if (now - _lastClapTime >= 2500) {
             _clapDetected = true;

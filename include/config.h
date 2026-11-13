@@ -27,6 +27,10 @@
 #define CAM_PIN_HREF 47
 #define CAM_PIN_PCLK 13
 
+// Camera sensor orientation in physical housing (180-degree rotation: vflip + hmirror)
+#define CAM_VFLIP 1
+#define CAM_HMIRROR 1
+
 // ============================================================================
 // 2. MICROSD CARD PINOUT (Onboard slot on Sense expansion board)
 // ============================================================================
@@ -50,10 +54,10 @@
 // 4. ST7789 IPS DISPLAY PINOUT (1.3" 240x240 or 1.69" 240x280)
 // ============================================================================
 // SPI3 Bus (HSPI) - hardware isolated from SD card SPI2 bus
-#define TFT_SCLK_PIN 2  // D1 (GPIO 2)
-#define TFT_MOSI_PIN 3  // D2 (GPIO 3)
-#define TFT_DC_PIN 4    // D3 (GPIO 4)
-#define TFT_RST_PIN -1  // Hardwired to 3.3V / EN
+#define TFT_SCLK_PIN 2  // D1 (GPIO 2, CLK)
+#define TFT_MOSI_PIN 3  // D2 (GPIO 3, DIN / MOSI)
+#define TFT_DC_PIN 4    // D3 (GPIO 4, DC)
+#define TFT_RST_PIN 43  // D6 (GPIO 43, Hardware Reset ST7789)
 #define TFT_CS_PIN -1   // Hardwired to GND
 #define TFT_BLK_PIN -1  // Backlight wired to 3.3V (via 22-47R current limiting resistor)
 
@@ -62,32 +66,32 @@
 #define PREVIEW_WIDTH 240
 #define PREVIEW_HEIGHT 240
 #define HUD_BAR_HEIGHT 40      // Dedicated telemetry HUD bar outside active camera frame
-#define TFT_SPI_FREQ 40000000  // 40 MHz SPI
+#define TFT_SPI_FREQ 27000000  // 27 MHz SPI (stabilne dla przylutowanych przewodów)
 
 // ============================================================================
 // 5. 2D ANALOG JOYSTICK, SHUTTER BUTTON, BUZZER AND TALLY LED
 // ============================================================================
 // Hardware Engineering Note:
-// ESP32-S3 pins D6 (GPIO 43) and D7 (GPIO 44) do NOT have hardware ADC capability.
-// Therefore, ADC-capable pins (D0, D4) are assigned to joystick X and Y axes,
-// while digital pins D6 and D7 are allocated for shutter button and tally LED:
+// - Ekran ST7789: SCLK=D1(GPIO 2), DIN=D2(GPIO 3), DC=D3(GPIO 4), RST=D6(GPIO 43), CS=GND
+// - Buzzer: D7 (GPIO 44)
+// - Joystick analogowy: Oś Y=D4(GPIO 5), Oś X=D5(GPIO 6)
+// - Przycisk migawki (Shutter): D0 (GPIO 1, zwolniony po przeniesieniu RST na D6)
 //
 // 1. 2D Analog Joystick (PSP-1000 slide joystick / thumb joystick):
-#define JOYSTICK_X_PIN 1  // D0 (GPIO 1, ADC1_CH0) - Horizontal axis X
-#define JOYSTICK_Y_PIN 5  // D4 (GPIO 5, ADC1_CH4) - Vertical axis Y
+#define JOYSTICK_X_PIN 6  // D5 (GPIO 6, ADC1_CH5) - Oś pozioma X
+#define JOYSTICK_Y_PIN 5  // D4 (GPIO 5, ADC1_CH4) - Oś pionowa Y
 #define USE_ANALOG_JOYSTICK 1
 
 // 2. Shutter / OK Button:
-#define BTN_SHUTTER_PIN 43  // D6 (GPIO 43, digital INPUT_PULLUP to GND)
-#define BTN_NAV_PIN 43      // Shared in FSM or navigated via joystick
+#define BTN_SHUTTER_PIN 1  // D0 (GPIO 1, digital INPUT_PULLUP to GND - zwolniony po RST na D6)
+#define BTN_NAV_PIN -1     // Dedykowany przycisk nawigacji wyłączony (nawigacja joystickiem)
 
-// 3. Signal Tally LED (shutter countdown, capture indicator):
-// Standard 3mm LED connected through a 1k resistor to GND
-#define LED_TALLY_PIN 44  // D7 (GPIO 44, digital OUTPUT)
-#define USE_TALLY_LED 1
+// 3. Signal Tally LED:
+#define LED_TALLY_PIN -1  // Opcjonalny (wyłączony)
+#define USE_TALLY_LED 0
 
 // 4. Passive Piezo Buzzer (chiptune audio, shutter click, countdown):
-#define BUZZER_PIN 6  // D5 (GPIO 6, hardware LEDC PWM Channel 7 to GND)
+#define BUZZER_PIN 44  // D7 (GPIO 44, hardware LEDC PWM Channel 7 do GND)
 #define USE_BUZZER 1
 
 #define DEBOUNCE_TIME_MS 30
@@ -98,13 +102,14 @@
 // ============================================================================
 enum CameraState {
     STATE_LIVE_VIEW,     // Live preview 240x240 RGB565 on ST7789
-    STATE_CAPTURE,       // Capture UXGA 1600x1200 JPEG, save to SD, flash animation
+    STATE_CAPTURE,       // Capture photo, save to SD, flash animation
     STATE_TIMELAPSE,     // Automated intervalometer (photos every 5s/10s/30s on tripod)
     STATE_BURST_STACK,   // Burst of 4-8 frames with temporal noise averaging
     STATE_RECORD_VIDEO,  // Record MJPEG AVI video to SD card
     STATE_GALLERY,       // Photo gallery viewer for SD card media
-    STATE_MENU,          // Settings menu (presets, brightness, Wi-Fi, time-lapse)
-    STATE_WIFI_SERVER    // SoftAP access point + HTTP WebServer for photo downloads
+    STATE_MENU,          // Settings menu (presets, brightness, Wi-Fi, gallery, mini-game)
+    STATE_WIFI_SERVER,   // SoftAP access point + HTTP WebServer for photo downloads
+    STATE_MINIGAME       // Built-in retro arcade mini-game (Mii-Snake)
 };
 
 enum CameraPreset {
@@ -128,7 +133,7 @@ enum CameraPreset {
 // Boot mode out-of-the-box:
 // 1 = automatic SoftAP launch for headless testing without LCD/buttons.
 // 0 = standard boot into ST7789 Live View.
-#define DEFAULT_BOOT_WIFI_TEST_MODE 1
+#define DEFAULT_BOOT_WIFI_TEST_MODE 0
 
 // ============================================================================
 // 8. STORAGE PATHS & FILESYSTEM DEFINITIONS

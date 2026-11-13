@@ -19,10 +19,11 @@ public:
         {
             auto cfg = _bus_instance.config();
             cfg.spi_host = SPI3_HOST;  // Fully isolated from MicroSD bus (SPI2_HOST)
-            cfg.spi_mode = 0;
-            cfg.freq_write = TFT_SPI_FREQ;  // 40 MHz
+            cfg.spi_mode =
+                3;  // SPI Mode 3 (CPOL=1, CPHA=1): zegar w spoczynku HIGH - zapobiega desynchronizacji przy CS na GND
+            cfg.freq_write = TFT_SPI_FREQ;
             cfg.freq_read = 16000000;
-            cfg.spi_3wire = true;
+            cfg.spi_3wire = false;
             cfg.use_lock = true;
             cfg.dma_channel = SPI_DMA_CH_AUTO;
             cfg.pin_sclk = TFT_SCLK_PIN;
@@ -38,10 +39,12 @@ public:
             cfg.pin_cs = TFT_CS_PIN;
             cfg.pin_rst = TFT_RST_PIN;
             cfg.pin_busy = -1;
+            cfg.memory_width = 240;
+            cfg.memory_height = 320;
             cfg.panel_width = TFT_WIDTH;
             cfg.panel_height = TFT_HEIGHT;
             cfg.offset_x = 0;
-            cfg.offset_y = 0;
+            cfg.offset_y = 20;  // 240x280 matryca jest wycentrowana w buforze 240x320 ST7789 (offset Y = 20)
             cfg.offset_rotation = 0;
             cfg.dummy_read_pixel = 8;
             cfg.dummy_read_bits = 1;
@@ -75,15 +78,17 @@ public:
     static void setBrightness(uint8_t brightness);
     static uint8_t getBrightness();
     static void cycleBrightness();
+    static void invalidateHud();
 
-    static void drawLiveView(const uint8_t* rgb565_buf, uint16_t w, uint16_t h, const char* presetName,
-                             uint16_t photoCount, bool sdOk);
+    static void drawLiveView(uint8_t* rgb565_buf, uint16_t w, uint16_t h, const char* presetName, uint16_t photoCount,
+                             bool sdOk);
 
     static void drawFlashAnimation();
     static void drawSavingProgress(const char* filename);
     static void drawGalleryPhoto(const char* filepath, uint16_t currentIdx, uint16_t totalCount);
     static void drawGalleryEmpty();
-    static void drawMenu(uint8_t selectedIndex, const char* currentPresetName, uint8_t brightnessLevel);
+    static void drawMenu(uint8_t selectedIndex, const char* currentPresetName, uint8_t brightnessLevel,
+                         bool buzzerMuted, uint16_t photoCount = 0, bool fullRedraw = true);
     static void drawWifiServerScreen(const char* ssid, const char* ip, uint16_t photoCount);
     static void showMessage(const char* title, const char* subtitle, uint16_t delayMs = 0);
 
@@ -92,6 +97,7 @@ public:
 private:
     static LGFX_ST7789 _lcd;
     static uint8_t _brightness;
-    static void drawReticle();
+    static bool _hudDirty;
+    static void drawReticleInBuffer(uint16_t* buf, uint16_t w, uint16_t h);
     static void drawHud(const char* presetName, uint16_t photoCount, bool sdOk);
 };

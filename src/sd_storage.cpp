@@ -1,25 +1,37 @@
 #include "sd_storage.h"
 #include <algorithm>
+#include <utility>
 #include "esp_log.h"
 
 static const char* TAG = "SD_STORAGE";
 
 bool SdStorage::_mounted = false;
 uint16_t SdStorage::_nextPhotoIndex = 1;
+uint64_t SdStorage::_totalBytes = 0;
+uint64_t SdStorage::_usedBytes = 0;
 std::vector<String> SdStorage::_photoFiles;
+std::vector<size_t> SdStorage::_photoSizes;
 
 bool SdStorage::init() {
     _mounted = false;
+    _totalBytes = 0;
+    _usedBytes = 0;
     _photoFiles.clear();
+    _photoSizes.clear();
 
     ESP_LOGI(TAG, "Initializing SPI for SD on SCK:%d MISO:%d MOSI:%d CS:%d", SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN,
              SD_CS_PIN);
 
     SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
 
+    // Try mounting at configured SPI frequency first, fallback to 10 MHz if card needs slower init
     if (!SD.begin(SD_CS_PIN, SPI, SD_SPI_FREQ)) {
-        ESP_LOGE(TAG, "Card Mount Failed! Check if microSD is inserted.");
-        return false;
+        ESP_LOGW(TAG, "SD mount at %d Hz failed, retrying at 10 MHz...", SD_SPI_FREQ);
+        delay(50);
+        if (!SD.begin(SD_CS_PIN, SPI, 10000000)) {
+            ESP_LOGE(TAG, "Card Mount Failed! Check if microSD is inserted.");
+            return false;
+        }
     }
 
     uint8_t cardType = SD.cardType();
@@ -28,7 +40,9 @@ bool SdStorage::init() {
         return false;
     }
 
-    ESP_LOGI(TAG, "SD Card mounted successfully. Type: %d, Size: %llu MB", cardType, SD.cardSize() / (1024 * 1024));
+    // Cache total card capacity once (fast BPB read; avoids f_getfree() FAT traversal later)
+    _totalBytes = SD.totalBytes();
+    ESP_LOGI(TAG, "SD Card mounted successfully. Type: %d, Size: %llu MB", cardType, _totalBytes / (1024 * 1024));
 
     if (!SD.exists(PHOTO_DIR)) {
         if (!SD.mkdir(PHOTO_DIR)) {
@@ -44,11 +58,23 @@ bool SdStorage::init() {
 }
 
 bool SdStorage::isAvailable() {
-    return _mounted && (SD.cardType() != CARD_NONE);
+    // Do NOT poll SD.cardType() on every frame — return cached mount status
+    // If not mounted at boot (e.g. card inserted later), attempt background mount every 4 seconds
+    if (!_mounted) {
+        static uint32_t lastRetry = 0;
+        uint32_t now = millis();
+        if (now - lastRetry > 4000) {
+            lastRetry = now;
+            init();
+        }
+    }
+    return _mounted;
 }
 
 void SdStorage::scanPhotos() {
     _photoFiles.clear();
+    _photoSizes.clear();
+    _usedBytes = 0;
     uint16_t maxIndex = 0;
 
     if (!_mounted) return;
@@ -59,16 +85,23 @@ void SdStorage::scanPhotos() {
         return;
     }
 
+    std::vector<std::pair<String, size_t>> entries;
     File file = root.openNextFile();
     while (file) {
         if (!file.isDirectory()) {
             String name = String(file.name());
-            // Ensure full path prefix
-            if (!name.startsWith("/")) {
-                name = String(PHOTO_DIR) + "/" + name;
+            // Ensure full path prefix /DCIM/...
+            if (!name.startsWith("/DCIM/")) {
+                if (name.startsWith("/")) {
+                    name = String(PHOTO_DIR) + name;
+                } else {
+                    name = String(PHOTO_DIR) + "/" + name;
+                }
             }
-            if (name.endsWith(".JPG") || name.endsWith(".jpg")) {
-                _photoFiles.push_back(name);
+            size_t fsize = file.size();
+            if ((name.endsWith(".JPG") || name.endsWith(".jpg")) && fsize > 100) {
+                entries.push_back(std::make_pair(name, fsize));
+                _usedBytes += fsize;
 
                 // Parse index e.g. IMG_0042.JPG
                 int idxPos = name.indexOf("IMG_");
@@ -85,9 +118,19 @@ void SdStorage::scanPhotos() {
     }
     root.close();
 
+    std::sort(entries.begin(), entries.end(),
+              [](const std::pair<String, size_t>& a, const std::pair<String, size_t>& b) { return a.first < b.first; });
+
+    _photoFiles.reserve(entries.size());
+    _photoSizes.reserve(entries.size());
+    for (const auto& e : entries) {
+        _photoFiles.push_back(e.first);
+        _photoSizes.push_back(e.second);
+    }
+
     _nextPhotoIndex = maxIndex + 1;
-    std::sort(_photoFiles.begin(), _photoFiles.end());
-    ESP_LOGI(TAG, "Scan complete: %d photos found. Next index: %d", (int)_photoFiles.size(), _nextPhotoIndex);
+    ESP_LOGI(TAG, "Scan complete: %d photos found (%llu KB). Next index: %d", (int)_photoFiles.size(),
+             _usedBytes / 1024, _nextPhotoIndex);
 }
 
 void SdStorage::refreshList() {
@@ -120,56 +163,24 @@ bool SdStorage::savePhoto(const uint8_t* buffer, size_t len, char* outFilename, 
         return false;
     }
 
-    // Inject standard EXIF header: Make = MIphoto, Model = camera
-    static const uint8_t exifHeader[] = {0xFF, 0xE1,                      // APP1 marker
-                                         0x00, 0x56,                      // Block length (86 bytes)
-                                         'E', 'x', 'i', 'f', 0x00, 0x00,  // Exif identifier
-                                         'I', 'I',                        // Little Endian (Intel)
-                                         0x2A, 0x00,                      // TIFF Magic (42)
-                                         0x08, 0x00, 0x00, 0x00,          // Offset to IFD0 (8 bytes)
-                                         0x03, 0x00,                      // Number of tags (3 tags)
-
-                                         // Tag 1: Make (0x010F) - "MIphoto" (8 bytes with null terminator)
-                                         0x0F, 0x01, 0x02, 0x00, 0x08, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00,
-                                         // Tag 2: Model (0x0110) - "camera" (7 bytes with null terminator)
-                                         0x10, 0x01, 0x02, 0x00, 0x07, 0x00, 0x00, 0x00, 0x3A, 0x00, 0x00, 0x00,
-                                         // Tag 3: Software (0x0131) - "MIphoto OS v1.2" (16 bytes with null terminator)
-                                         0x31, 0x01, 0x02, 0x00, 0x10, 0x00, 0x00, 0x00, 0x41, 0x00, 0x00, 0x00,
-
-                                         0x00, 0x00, 0x00, 0x00,  // Next IFD (terminal)
-
-                                         // String values in TIFF structure:
-                                         // Offset 0x32: Make
-                                         'M', 'I', 'p', 'h', 'o', 't', 'o', 0x00,
-                                         // Offset 0x3A: Model
-                                         'c', 'a', 'm', 'e', 'r', 'a', 0x00,
-                                         // Offset 0x41: Software
-                                         'M', 'I', 'p', 'h', 'o', 't', 'o', ' ', 'O', 'S', ' ', 'v', '1', '.', '2',
-                                         0x00};
-
-    size_t written = 0;
-    // If buffer begins with JPEG SOI (0xFF, 0xD8), inject EXIF block between SOI and image stream
-    if (len > 4 && buffer[0] == 0xFF && buffer[1] == 0xD8) {
-        written += file.write(buffer, 2);                       // Write SOI (0xFF 0xD8)
-        written += file.write(exifHeader, sizeof(exifHeader));  // Inject EXIF APP1
-        written += file.write(buffer + 2, len - 2);             // Write JPEG payload
-    } else {
-        written = file.write(buffer, len);
-    }
-
+    size_t written = file.write(buffer, len);
     file.flush();
     file.close();
 
     uint32_t tElapsed = millis() - tStart;
 
     if (written < len) {
-        ESP_LOGE(TAG, "Write error: wrote %d bytes", written);
+        ESP_LOGE(TAG, "Write error: wrote %d of %d bytes", (int)written, (int)len);
+        SD.remove(filename);
         return false;
     }
 
-    ESP_LOGI(TAG, "Saved %s in %u ms (%.2f KB/s)", filename, tElapsed, (len / 1024.0f) / (tElapsed / 1000.0f));
+    float elapsedSec = (tElapsed > 0) ? (tElapsed / 1000.0f) : 0.001f;
+    ESP_LOGI(TAG, "Saved %s in %u ms (%.2f KB/s)", filename, tElapsed, (len / 1024.0f) / elapsedSec);
 
     _photoFiles.push_back(String(filename));
+    _photoSizes.push_back(len);
+    _usedBytes += len;
     _nextPhotoIndex++;
 
     if (outFilename && maxLen > 0) {
@@ -195,6 +206,11 @@ bool SdStorage::deletePhoto(const char* filename) {
 
 size_t SdStorage::getPhotoSize(const char* filename) {
     if (!_mounted || !filename) return 0;
+    auto it = std::find(_photoFiles.begin(), _photoFiles.end(), filename);
+    if (it != _photoFiles.end()) {
+        size_t idx = std::distance(_photoFiles.begin(), it);
+        return _photoSizes[idx];
+    }
     File file = SD.open(filename, FILE_READ);
     if (!file) return 0;
     size_t sz = file.size();
@@ -202,12 +218,21 @@ size_t SdStorage::getPhotoSize(const char* filename) {
     return sz;
 }
 
+size_t SdStorage::getPhotoSizeByIndex(size_t index) {
+    if (index < _photoSizes.size()) {
+        return _photoSizes[index];
+    }
+    return 0;
+}
+
 uint64_t SdStorage::getTotalBytes() {
     if (!_mounted) return 0;
-    return SD.totalBytes();
+    return _totalBytes;
 }
 
 uint64_t SdStorage::getUsedBytes() {
     if (!_mounted) return 0;
-    return SD.usedBytes();
+    // Return cached DCIM media byte count immediately without calling SD.usedBytes() (FatFs f_getfree),
+    // which traverses the entire FAT table over SPI and can trigger the 5s Task Watchdog reset.
+    return _usedBytes;
 }
